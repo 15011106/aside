@@ -47,6 +47,7 @@ type coverState struct {
 	waited  time.Duration // time spent waiting before the current step
 	done    bool
 
+	paused    bool
 	verb      string
 	started   time.Time
 	tokens    int
@@ -79,6 +80,9 @@ func (c *coverState) enqueueScenario() {
 // advance moves the animation on by one tick and reports whether anything
 // changed, so the view is only rebuilt when it has to be.
 func (c *coverState) advance() bool {
+	if c.paused {
+		return false
+	}
 	c.spinFrame++
 	if c.index >= len(c.steps) {
 		// the session ran out: start another piece of work rather than
@@ -146,6 +150,38 @@ func (c *coverState) finishStep(line string) {
 	}
 }
 
+// pause freezes the session the way esc interrupts the real one, leaving
+// the transcript standing and the spinner gone. Resuming reads as the
+// obvious next thing: asking it to carry on.
+func (c *coverState) pause() {
+	if c.paused {
+		return
+	}
+	c.paused = true
+	if c.partial != "" {
+		c.shown = append(c.shown, c.partial)
+		c.partial = ""
+	}
+	c.shown = append(c.shown, dim.Render("  ⎿  Interrupted by user"))
+}
+
+func (c *coverState) resume() {
+	if !c.paused {
+		return
+	}
+	c.paused = false
+	c.shown = append(c.shown, "", dim.Render("> ")+"continue")
+	c.waited = 0
+}
+
+func (c *coverState) togglePause() {
+	if c.paused {
+		c.resume()
+		return
+	}
+	c.pause()
+}
+
 // render lays the session out at the given width.
 func (c *coverState) render(width int) string {
 	wrap := lipgloss.NewStyle().Width(max(30, width))
@@ -165,6 +201,11 @@ func (c *coverState) render(width int) string {
 // status is the spinner line: elapsed time and a token count that only
 // ever climbs, the way the real one does.
 func (c *coverState) status() string {
+	if c.paused {
+		// no spinner while stopped: that is what an interrupted session
+		// looks like, and it doubles as the "paused" indicator
+		return ""
+	}
 	frame := spinnerFrames[c.spinFrame/4%len(spinnerFrames)]
 	verb := c.verb
 	if verb == "" {

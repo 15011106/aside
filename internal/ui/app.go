@@ -359,6 +359,13 @@ func (m model) handleKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		switch key.String() {
 		case "ctrl+q", "ctrl+c":
 			return m, tea.Quit
+		case "esc":
+			// the spinner advertises "esc to interrupt" — make it true
+			if m.coverState != nil {
+				m.coverState.togglePause()
+				m.refreshViewport()
+			}
+			return m, nil
 		case "enter":
 			text := strings.TrimSpace(m.input.Value())
 			if text == "" {
@@ -366,6 +373,7 @@ func (m model) handleKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			}
 			m.input.Reset()
 			if m.coverState != nil {
+				m.coverState.paused = false
 				m.coverState.ask(text)
 			}
 			m.refreshViewport()
