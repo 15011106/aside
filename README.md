@@ -69,3 +69,7 @@ aside probe <room>      # diagnose send-button detection (sends nothing)
 
 Development notes and the accessibility domain knowledge live in
 [CLAUDE.md](CLAUDE.md).
+
+## License
+
+MIT — see [LICENSE](LICENSE).
