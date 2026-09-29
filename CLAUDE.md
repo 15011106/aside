@@ -11,7 +11,7 @@ make build     # swiftc로 bridge를 .a로 컴파일 → cgo 링크
 ./aside doctor # 권한·카톡 상태 점검
 ./aside ls 10  # 대화 목록 (읽기 전용, 안전)
 ./aside        # TUI — ↑/↓·Enter로 방 선택, `/`로 이름 필터
-./aside read 침용   # 이름 일부만으로 해석: 창 없으면 열어서(읽음처리됨) 읽음
+./aside read <이름일부>   # 이름 일부만으로 해석: 창 없으면 열어서(읽음처리됨) 읽음
 ```
 
 - 요구사항: 터미널 앱에 손쉬운 사용 권한만. 카톡이 꺼져 있으면 aside가 숨김

@@ -53,7 +53,7 @@ There are CLI subcommands too:
 
 ```bash
 aside ls 10             # list conversations (does not mark them read)
-aside read 침용          # resolve a partial name and read that room
+aside read <partial>    # resolve a partial room name and read it
 aside send <room> <text>
 aside probe <room>      # diagnose send-button detection (sends nothing)
 ```

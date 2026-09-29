@@ -52,7 +52,7 @@ CLI 서브커맨드도 있습니다:
 
 ```bash
 aside ls 10          # 대화 목록 (읽음 처리 안 됨)
-aside read 침용      # 이름 일부로 방을 찾아 읽기
+aside read <이름일부>   # 이름 일부로 방을 찾아 읽기
 aside send 방이름 텍스트
 aside probe 방이름   # 전송 버튼 탐지 진단 (메시지 안 나감)
 ```
