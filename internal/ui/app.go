@@ -60,6 +60,7 @@ type errMsg struct{ err error }
 type reopenFailedMsg struct{ err error }
 type tickMsg struct{}
 type spinMsg struct{}
+type coverTickMsg struct{}
 
 type model struct {
 	mode    int
@@ -83,6 +84,7 @@ type model struct {
 	// English agent session so a passer-by sees code talk, never Hangul.
 	// Real state stays intact underneath; polling keeps running.
 	cover        bool
+	coverState   *coverState
 	stashedInput string
 
 	// spinner disguise: an elapsed clock and a token counter that only ever
@@ -193,6 +195,10 @@ func reopenRoom(title string) tea.Cmd {
 	}
 }
 
+func coverTick() tea.Cmd {
+	return tea.Tick(coverTick_, func(time.Time) tea.Msg { return coverTickMsg{} })
+}
+
 func tick() tea.Cmd {
 	return tea.Tick(pollInterval, func(time.Time) tea.Msg { return tickMsg{} })
 }
@@ -285,6 +291,15 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.errText = msg.err.Error()
 		return m, func() tea.Msg { return fetchRooms() }
 
+	case coverTickMsg:
+		if !m.cover || m.coverState == nil {
+			return m, nil
+		}
+		if m.coverState.advance() {
+			m.refreshViewport()
+		}
+		return m, coverTick()
+
 	case spinMsg:
 		if !m.busy {
 			return m, nil
@@ -323,19 +338,42 @@ func (m model) handleKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if m.cover {
 			m.stashedInput = m.input.Value()
 			m.input.Reset()
-		} else {
-			m.input.SetValue(m.stashedInput)
-			m.input.CursorEnd()
-			m.stashedInput = ""
+			m.coverState = newCoverState()
+			m.refreshViewport()
+			return m, tea.Batch(m.input.Focus(), coverTick())
+		}
+		m.coverState = nil
+		m.input.SetValue(m.stashedInput)
+		m.input.CursorEnd()
+		m.stashedInput = ""
+		if m.mode != modeChat {
+			m.input.Blur()
 		}
 		m.refreshViewport()
 		return m, nil
 	}
+
+	// While covered the screen answers for itself: typing goes to the fake
+	// session and can never reach a real conversation.
 	if m.cover {
-		if key.String() == "ctrl+q" {
+		switch key.String() {
+		case "ctrl+q", "ctrl+c":
 			return m, tea.Quit
+		case "enter":
+			text := strings.TrimSpace(m.input.Value())
+			if text == "" {
+				return m, nil
+			}
+			m.input.Reset()
+			if m.coverState != nil {
+				m.coverState.ask(text)
+			}
+			m.refreshViewport()
+			return m, nil
 		}
-		return m, nil
+		var cmd tea.Cmd
+		m.input, cmd = m.input.Update(key)
+		return m, cmd
 	}
 
 	switch key.String() {
@@ -487,22 +525,29 @@ func (m model) View() tea.View {
 	b.WriteString(m.renderWelcome())
 	b.WriteString("\n")
 
-	// Panic screen: canned English session, no live input, no cursor — so a
-	// glance shows code talk and a stray keystroke can't type into a chat.
+	// Panic screen: a live-looking agent session. It streams, it answers
+	// what is typed into it, and nothing typed here can reach a real
+	// conversation — the cover engine is the only listener.
 	if m.cover {
-		if m.mode == modeChat {
-			b.WriteString(m.vp.View())
-			b.WriteString("\n\n")
-			b.WriteString(boxStyle.Width(max(20, m.width-2)).
-				Render("> " + dim.Render("try \"add a metric for the dead-letter path\"")))
-		} else {
-			b.WriteString(coverRooms(m.height, m.width))
-			b.WriteString("\n")
+		b.WriteString(m.vp.View())
+		b.WriteString("\n")
+		if m.coverState != nil {
+			b.WriteString(m.coverState.status())
 		}
 		b.WriteString("\n")
+		b.WriteString(boxStyle.Width(max(20, m.width-2)).Render(m.input.View()))
+		b.WriteString("\n")
 		b.WriteString(m.renderShortcuts())
+
 		view := tea.NewView(b.String())
 		view.AltScreen = true
+		if c := m.input.Cursor(); c != nil {
+			runes := []rune(m.input.Value())
+			pos := min(m.input.Position(), len(runes))
+			c.Position.X = 2 + lipgloss.Width(m.input.Prompt) + lipgloss.Width(string(runes[:pos]))
+			c.Position.Y = strings.Count(b.String(), "\n") - 2
+			view.Cursor = c
+		}
 		return view
 	}
 
@@ -628,68 +673,14 @@ func (m model) renderRooms() string {
 // refreshViewport repaints the transcript, honouring cover mode.
 func (m *model) refreshViewport() {
 	if m.cover {
-		m.vp.SetContent(coverTranscript(max(30, m.width-8)))
+		if m.coverState != nil {
+			m.vp.SetContent(m.coverState.render(max(30, m.width-8)))
+		}
 		m.vp.GotoBottom()
 		return
 	}
 	m.vp.SetContent(m.renderMessages())
 	m.vp.GotoBottom()
-}
-
-// coverTranscript is the panic screen's fake session: an ordinary-looking
-// English exchange about code, in the same visual grammar as the real view.
-func coverTranscript(width int) string {
-	wrap := lipgloss.NewStyle().Width(width)
-	line := func(parts ...string) string { return strings.Join(parts, "") }
-
-	var b strings.Builder
-	b.WriteString(dim.Render("> ") + wrap.Render("the webhook handler retries forever when the provider 502s. what's the right backoff here?") + "\n\n")
-	b.WriteString(toolGreen.Render("● ") + "Search" + dim.Render("(pattern: \"retry|backoff\", path: internal/)") + "\n")
-	b.WriteString(dim.Render("  ⎿  ") + wrap.Render("14 matches across 6 files") + "\n\n")
-	b.WriteString(toolGreen.Render("● ") + "Read" + dim.Render("(internal/webhook/handler.go)") + "\n")
-	b.WriteString(dim.Render("  ⎿  ") + wrap.Render("Read 212 lines") + "\n\n")
-	b.WriteString(line(wrap.Render("The loop in handler.go:88 retries on any non-2xx with a fixed 500ms sleep and no ceiling, so a provider outage turns into an unbounded hot loop. Three things to change:"), "\n\n"))
-	b.WriteString(wrap.Render("  1. Exponential backoff with full jitter, capped at 30s") + "\n")
-	b.WriteString(wrap.Render("  2. A max attempt count (5) after which the event goes to the dead-letter table") + "\n")
-	b.WriteString(wrap.Render("  3. Retry only on 429/5xx and network errors — 4xx will never succeed") + "\n\n")
-	b.WriteString(toolGreen.Render("● ") + "Update" + dim.Render("(internal/webhook/handler.go)") + "\n")
-	b.WriteString(dim.Render("  ⎿  ") + wrap.Render("Updated with 3 additions and 1 removal") + "\n\n")
-	b.WriteString(dim.Render("> ") + wrap.Render("does the dead-letter path need its own metric?") + "\n\n")
-	b.WriteString(wrap.Render("Yes — otherwise a silent drain looks identical to healthy traffic. I'd add a counter incremented at the point of insert, labelled by provider and last status code, and alert on any non-zero rate over a 5 minute window.") + "\n\n")
-	b.WriteString(toolGreen.Render("● ") + "Bash" + dim.Render("(go test ./internal/webhook/...)") + "\n")
-	b.WriteString(dim.Render("  ⎿  ") + wrap.Render("ok  	aside/internal/webhook	1.284s") + "\n\n")
-	return b.String()
-}
-
-// coverRooms is the panic screen for the picker: plausible English sessions
-// in place of the room list, which would otherwise show Hangul names.
-func coverRooms(height, width int) string {
-	rows := []struct{ when, what string }{
-		{"2 minutes ago", "webhook retry backoff + dead-letter metric"},
-		{"1 hour ago", "flaky TestConsumerRebalance — fix ordering assumption"},
-		{"3 hours ago", "drop the redundant index on orders(created_at)"},
-		{"Yesterday", "migrate config loader to embed.FS"},
-		{"Yesterday", "trace ctx cancellation through the payment path"},
-		{"2 days ago", "review: batch writer PR #418"},
-		{"3 days ago", "cut allocations in the JSON decode hot path"},
-	}
-	var b strings.Builder
-	b.WriteString(boldStyle.Render(" Resume Session") + "\n")
-	b.WriteString(dim.Render("     Modified      Summary") + "\n")
-	visible := max(3, height-11)
-	for i, r := range rows {
-		if i >= visible {
-			break
-		}
-		line := fmt.Sprintf(" %2d. %-12s %s", i+1, clip(r.when, 12), dim.Render(clip(r.what, max(10, width-24))))
-		if i == 0 {
-			line = selStyle.Render("❯") + line
-		} else {
-			line = " " + line
-		}
-		b.WriteString(line + "\n")
-	}
-	return b.String()
 }
 
 func (m model) renderMessages() string {
