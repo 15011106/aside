@@ -1,66 +1,71 @@
 # aside
 
-터미널에서 카카오톡 DM을 읽고 보내는 macOS 도구. 화면은 코딩 에이전트 세션처럼
-보이지만 실제로는 카카오톡입니다.
+**English** · [한국어](README.ko.md)
 
-> *aside* (방백) — 무대 위에서 다른 배우들 몰래 관객에게만 하는 대사.
+Read and send KakaoTalk DMs from your terminal, on a screen that reads as a
+coding agent session.
 
+> *aside* — a line delivered on stage for the audience alone, unheard by the
+> other characters.
 
+## What it is
 
-## 무엇인가
+aside drives the macOS KakaoTalk app through the system Accessibility API.
+There is no server, no protocol reverse engineering, and no message store:
+the official app is the only thing that talks to Kakao, and aside reads its
+window and types into its composer. Conversations are never written to disk.
 
-카카오톡 macOS 앱을 접근성(Accessibility) API로 조작합니다. 별도 서버도, 프로토콜
-역공학도 없습니다 — 카카오 서버와 통신하는 것은 공식 앱뿐이고, aside는 그 화면을
-읽고 입력창에 타이핑할 뿐입니다. 대화 내용은 어디에도 저장하지 않습니다.
+- **One Go binary** with the Swift bridge linked in — nothing to install at runtime
+- **Stays out of sight** — opens rooms, reads and sends while KakaoTalk is hidden, without stealing focus
+- **Korean and English UIs both work** — rooms are matched by structure and geometry, not by label
+- **Panic key (F1)** — replaces the whole screen with an English agent session, instantly
 
-- **Go 단일 바이너리** (Swift 브릿지 정적 링크) — 런타임 의존성 없음
-- **무소음 동작** — 카카오톡을 숨긴 채로 방 열기·읽기·전송. 포커스를 뺏지 않음
-- **한/영 UI 모두 지원** — 라벨이 아니라 구조와 기하학으로 판별
-- **패닉 키(F1)** — 화면 전체를 영어 에이전트 세션으로 즉시 전환
+## Install
 
-## 설치
-
-macOS 13 이상 (Apple Silicon / Intel).
+macOS 13 or later (Apple Silicon and Intel).
 
 ```bash
 make build
-./aside doctor   # 권한·카카오톡 상태 점검
-./aside          # 실행
+./aside doctor   # check accessibility permission and KakaoTalk state
+./aside          # run
 ```
 
-배포용 zip은 `make dist VERSION=0.1.6` — 유니버설 바이너리와 설치 스크립트가 들어갑니다.
+`make dist VERSION=0.1.6` produces a universal binary and installer zip.
 
-**접근성 권한**이 필요합니다: 시스템 설정 → 개인정보 보호 및 보안 → 손쉬운 사용에서
-aside를 실행하는 터미널 앱을 켜세요. 권한을 켠 뒤 터미널을 완전히 종료(⌘Q)했다가
-다시 열어야 적용됩니다.
+**Accessibility permission is required:** System Settings → Privacy & Security
+→ Accessibility, and enable the terminal app you run aside from. Quit the
+terminal completely (⌘Q) and reopen it afterwards — the permission is not
+picked up until then.
 
-## 사용
+## Use
 
 ```
-↑ / ↓     대화 이동
-/         이름으로 검색
-Enter     방 열기 / 메시지 전송
-F1        화면 가리기 (한 번 더 누르면 복귀)
-Esc       뒤로 (aside가 연 창은 자동으로 닫힘)
-?         단축키 도움말
-Ctrl+Q    종료
+↑ / ↓     move between conversations
+/         search by name
+Enter     open a room / send a message
+F1        cover the screen (press again to return)
+Esc       back (rooms aside opened are closed again)
+?         show shortcuts
+Ctrl+Q    quit
 ```
 
-CLI 서브커맨드도 있습니다:
+There are CLI subcommands too:
 
 ```bash
-aside ls 10          # 대화 목록 (읽음 처리 안 됨)
-aside read 침용      # 이름 일부로 방을 찾아 읽기
-aside send 방이름 텍스트
-aside probe 방이름   # 전송 버튼 탐지 진단 (메시지 안 나감)
+aside ls 10             # list conversations (does not mark them read)
+aside read 침용          # resolve a partial name and read that room
+aside send <room> <text>
+aside probe <room>      # diagnose send-button detection (sends nothing)
 ```
 
-## 알아둘 점
+## Worth knowing
 
-- 방을 열면 카카오톡에서 그 방이 **읽음 처리**됩니다 (앱을 직접 열 때와 동일).
-- 카카오톡이 꺼져 있으면 aside가 숨김 상태로 자동 실행하고, 로그인이 필요하면
-  알려줍니다.
-- 회사·학교 정책이나 기기 모니터링을 우회하는 도구가 아닙니다. 주변 시선을 줄이기
-  위한 표시 방식일 뿐이며, 사용 책임은 사용자에게 있습니다.
+- Opening a room marks it **read** in KakaoTalk, exactly as opening it in the
+  app would.
+- If KakaoTalk is not running, aside launches it hidden, and tells you when a
+  login is needed.
+- This is not a tool for evading workplace policy or device monitoring. It
+  changes how messages are displayed, nothing more; how you use it is on you.
 
-개발 메모와 도메인 지식은 [CLAUDE.md](CLAUDE.md)에 있습니다.
+Development notes and the accessibility domain knowledge live in
+[CLAUDE.md](CLAUDE.md).
