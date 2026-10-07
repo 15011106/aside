@@ -71,6 +71,7 @@ type messagesMsg struct {
 type sentMsg struct{}
 type errMsg struct{ err error }
 type reopenFailedMsg struct{ err error }
+type photoClosedMsg struct{}
 type tickMsg struct{}
 type spinMsg struct{}
 type coverTickMsg struct{}
@@ -366,6 +367,11 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case photoClosedMsg:
+		// the viewer handed the terminal back; redraw what we had
+		m.refreshViewport()
+		return m, nil
+
 	case spinMsg:
 		if !m.busy {
 			return m, nil
@@ -620,13 +626,38 @@ func (m model) openPhoto(index int) (tea.Model, tea.Cmd) {
 		m.errText = err.Error()
 		return m, nil
 	}
-	if err := exec.Command("open", saved).Start(); err != nil {
-		m.errText = err.Error()
+
+	// Bubble Tea's renderer works in cells and drops image escapes, so the
+	// picture cannot be drawn inside the transcript. Handing the terminal
+	// over for a moment does work, and keeps it in the terminal rather
+	// than opening a separate app.
+	if viewer := os.Getenv("ASIDE_PHOTO_VIEWER"); viewer == "open" {
+		if err := exec.Command("open", saved).Start(); err != nil {
+			m.errText = err.Error()
+			return m, nil
+		}
+		m.errText = ""
+		m.notice = fmt.Sprintf("opened photo %d of %d", index, len(media))
 		return m, nil
 	}
+
 	m.errText = ""
-	m.notice = fmt.Sprintf("opened photo %d of %d", index, len(media))
-	return m, nil
+	m.notice = fmt.Sprintf("photo %d of %d", index, len(media))
+	return m, tea.ExecProcess(inlineViewer(saved, max(20, m.width-4)), func(error) tea.Msg {
+		return photoClosedMsg{}
+	})
+}
+
+// inlineViewer prints the image into the terminal itself using the iTerm2
+// inline-image protocol and waits for a keypress before handing control
+// back. Width is in character cells so the picture fits the window.
+func inlineViewer(path string, cells int) *exec.Cmd {
+	script := fmt.Sprintf(
+		`printf '\033]1337;File=inline=1;width=%d;preserveAspectRatio=1:%%s\a\n' "$(base64 < %q)"; `+
+			`printf '\n  any key to go back '; stty raw -echo 2>/dev/null; `+
+			`dd bs=1 count=1 >/dev/null 2>&1; stty sane 2>/dev/null; printf '\n'`,
+		cells, path)
+	return exec.Command("/bin/sh", "-c", script)
 }
 
 func (m model) openSelected() (tea.Model, tea.Cmd) {
