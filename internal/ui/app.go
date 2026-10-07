@@ -121,6 +121,16 @@ type model struct {
 	photoLines map[int]int
 	hoverPhoto int
 
+	// inline preview: the terminal draws the picture itself, in blank
+	// rows the renderer reserves under the placeholder.
+	imageProto   imageProtocol
+	hoverSeq     int
+	shownPhoto   int
+	reserveStart int
+	reserveRows  int
+	reserveCols  int
+	photoCache   map[string]photoImage
+
 	// lastChange is when the open room last produced something new; the
 	// poll runs faster for a while afterwards.
 	lastChange time.Time
@@ -355,15 +365,78 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, coverTick()
 
 	case tea.MouseMotionMsg:
-		if n := m.photoAt(msg.Y); n != m.hoverPhoto {
-			m.hoverPhoto = n
-			m.refreshViewport()
+		n := m.photoAt(msg.Y)
+		if n == m.hoverPhoto {
+			return m, nil
+		}
+		m.hoverSeq++
+		var cmds []tea.Cmd
+		if m.shownPhoto != 0 && n != m.shownPhoto {
+			cmds = append(cmds, m.hidePhoto())
+		}
+		m.hoverPhoto = n
+		m.repaint()
+		if n > 0 && m.imageProto != protoNone {
+			// let the pointer settle, so sweeping across text does not
+			// flash pictures
+			seq := m.hoverSeq
+			cmds = append(cmds, tea.Tick(200*time.Millisecond, func(time.Time) tea.Msg {
+				return hoverSettleMsg{seq: seq, photo: n}
+			}))
+		}
+		return m, tea.Batch(cmds...)
+
+	case hoverSettleMsg:
+		if msg.seq != m.hoverSeq || msg.photo != m.hoverPhoto {
+			return m, nil
+		}
+		target, key := m.photoMessage(msg.photo)
+		if key == "" {
+			return m, nil
+		}
+		if img, ok := m.photoCache[key]; ok {
+			return m, m.showPhoto(msg.photo, img)
+		}
+		room := m.room
+		return m, func() tea.Msg {
+			img, err := loadPhoto(room, target)
+			return photoLoadedMsg{key: key, image: img, err: err}
+		}
+
+	case photoLoadedMsg:
+		if msg.err != nil {
+			return m, nil // clicking still opens it in the system viewer
+		}
+		m.photoCache[msg.key] = msg.image
+		if _, key := m.photoMessage(m.hoverPhoto); key == msg.key && m.shownPhoto == 0 {
+			return m, m.showPhoto(m.hoverPhoto, msg.image)
 		}
 		return m, nil
+
+	case drawPhotoMsg:
+		if msg.seq != m.hoverSeq || m.shownPhoto == 0 {
+			return m, nil
+		}
+		_, key := m.photoMessage(m.shownPhoto)
+		img, ok := m.photoCache[key]
+		if !ok {
+			return m, nil
+		}
+		row := m.transcriptTop() + m.reserveStart - m.vp.YOffset()
+		if row < m.transcriptTop() || row+m.reserveRows > m.transcriptTop()+m.vp.Height() {
+			return m, nil // scrolled out of view
+		}
+		return m, tea.Raw(drawSequence(m.imageProto, img, row+1, photoCol+1, m.reserveCols, m.reserveRows))
 
 	case tea.MouseClickMsg:
 		if n := m.photoAt(msg.Y); n > 0 {
 			return m.openPhoto(n)
+		}
+		return m, nil
+
+	case tea.MouseWheelMsg:
+		if cmd := m.hidePhoto(); cmd != nil {
+			return m, cmd
 		}
 		return m, nil
 
@@ -549,11 +622,13 @@ func (m model) handleKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 	case "pgup":
+		hide := m.hidePhoto()
 		m.vp.HalfPageUp()
-		return m, nil
+		return m, hide
 	case "pgdown":
+		hide := m.hidePhoto()
 		m.vp.HalfPageDown()
-		return m, nil
+		return m, hide
 	case "ctrl+p":
 		return m.openPhoto(0)
 	case "ctrl+o":
@@ -659,6 +734,100 @@ func inlineViewer(path string, cells int) *exec.Cmd {
 		cells, path)
 	return exec.Command("/bin/sh", "-c", script)
 }
+
+const photoCol = 5 // where a reserved preview starts, matching the ⎿ indent
+
+// photoMessage returns the nth media message in view and a cache key for
+// it. The key includes the rect, so a picture re-captured after scrolling
+// is not confused with another one.
+func (m model) photoMessage(index int) (kakao.Message, string) {
+	n := 0
+	for _, msg := range m.msgs {
+		if !msg.IsMedia() {
+			continue
+		}
+		n++
+		if n == index {
+			return msg, fmt.Sprintf("%s|%.0f,%.0f,%.0f,%.0f", m.room, msg.X, msg.Y, msg.W, msg.H)
+		}
+	}
+	return kakao.Message{}, ""
+}
+
+// showPhoto reserves blank rows under the placeholder and schedules the
+// draw for once that frame is on screen.
+func (m *model) showPhoto(index int, img photoImage) tea.Cmd {
+	cols := min(60, max(20, m.width-12))
+	rows := min(photoRows(img, cols), max(3, m.vp.Height()-4))
+	if full := photoRows(img, cols); rows < full {
+		cols = max(12, int(float64(cols)*float64(rows)/float64(full)))
+	}
+	m.shownPhoto = index
+	m.reserveRows = rows
+	m.reserveCols = cols
+	m.repaint()
+	m.locateReserve()
+
+	if bottom := m.reserveStart + m.reserveRows; bottom > m.vp.YOffset()+m.vp.Height() {
+		m.vp.SetYOffset(bottom - m.vp.Height())
+	}
+	seq := m.hoverSeq
+	return tea.Tick(60*time.Millisecond, func(time.Time) tea.Msg { return drawPhotoMsg{seq: seq} })
+}
+
+// hidePhoto drops the reserved rows and forces a full redraw, since the
+// renderer only repaints cells it believes changed — without that the
+// picture would linger.
+func (m *model) hidePhoto() tea.Cmd {
+	if m.shownPhoto == 0 {
+		return nil
+	}
+	m.shownPhoto = 0
+	m.reserveRows = 0
+	m.repaint()
+	clear := clearSequence(m.imageProto)
+	return tea.Sequence(
+		func() tea.Msg {
+			if clear != "" {
+				return tea.RawMsg{Msg: clear}
+			}
+			return nil
+		},
+		tea.ClearScreen,
+	)
+}
+
+// locateReserve finds the blank block under the placeholder in the
+// rendered transcript.
+func (m *model) locateReserve() {
+	marker := -1
+	for line, photo := range m.photoLines {
+		if photo == m.shownPhoto {
+			marker = line
+		}
+	}
+	lines := strings.Split(m.vp.GetContent(), "\n")
+	m.reserveStart = marker + 1
+	for i := marker + 1; i >= 0 && i < len(lines); i++ {
+		if strings.TrimSpace(stripANSI(lines[i])) == "" {
+			m.reserveStart = i
+			return
+		}
+	}
+}
+
+// repaint rebuilds the transcript without jumping to the bottom.
+func (m *model) repaint() {
+	offset := m.vp.YOffset()
+	content := m.renderMessages()
+	m.photoLines = indexPhotos(content)
+	m.vp.SetContent(content)
+	m.vp.SetYOffset(offset)
+}
+
+var ansiPattern = regexp.MustCompile(`\x1b\[[0-9;]*[a-zA-Z]`)
+
+func stripANSI(s string) string { return ansiPattern.ReplaceAllString(s, "") }
 
 func (m model) openSelected() (tea.Model, tea.Cmd) {
 	rooms := m.filteredRooms()
@@ -864,7 +1033,19 @@ func (m model) photoAt(screenY int) int {
 	if m.mode != modeChat || m.cover || len(m.photoLines) == 0 {
 		return 0
 	}
-	return m.photoLines[screenY-m.transcriptTop()+m.vp.YOffset()]
+	line := screenY - m.transcriptTop() + m.vp.YOffset()
+	// hovering the picture itself counts as hovering its placeholder,
+	// otherwise moving onto it would dismiss it
+	if m.shownPhoto > 0 && line >= m.reserveStart && line < m.reserveStart+m.reserveRows {
+		return m.shownPhoto
+	}
+	// a row of slack either side: a one-row target is hard to hold
+	for _, candidate := range []int{line, line + 1, line - 1} {
+		if photo, ok := m.photoLines[candidate]; ok {
+			return photo
+		}
+	}
+	return 0
 }
 
 // transcriptTop is the first screen row of the transcript: the welcome box
@@ -902,14 +1083,27 @@ func (m model) renderMessages() string {
 			if photoNo == m.hoverPhoto {
 				style = claude.Underline(true).Bold(true)
 			}
-			tag := style.Render(fmt.Sprintf("[%s %d — click to open]", label, photoNo))
+			hint := "hover to see"
+			if m.imageProto == protoNone {
+				hint = "click to open"
+			}
+			tag := style.Render(fmt.Sprintf("[%s %d — %s]", label, photoNo, hint))
 			if msg.Mine {
-				b.WriteString(dim.Render("> ") + tag + "\n\n")
+				b.WriteString(dim.Render("> ") + tag + "\n")
+				if m.shownPhoto == photoNo && m.reserveRows > 0 {
+					b.WriteString(strings.Repeat(" \n", m.reserveRows))
+				}
+				b.WriteString("\n")
 				lastSender = ""
 				continue
 			}
 			openSender()
-			b.WriteString(dim.Render("  ⎿  ") + tag + "\n\n")
+			b.WriteString(dim.Render("  ⎿  ") + tag + "\n")
+			if m.shownPhoto == photoNo && m.reserveRows > 0 {
+				// blank rows the terminal draws the picture into
+				b.WriteString(strings.Repeat(" \n", m.reserveRows))
+			}
+			b.WriteString("\n")
 			continue
 		}
 

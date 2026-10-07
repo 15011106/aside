@@ -70,12 +70,17 @@ make build     # swiftc로 bridge를 .a로 컴파일 → cgo 링크
   캡처는 레티나 2배로 나오므로 `이미지폭/창폭`으로 스케일을 구해 크롭한다(실검증).
   macOS 15부터 `CGWindowListCreateImage`는 폐기 — `screencapture` CLI를 쓴다.
   **Screen Recording 권한**이 필요하다(손쉬운 사용과 별개).
-- 사진 보기는 **터미널 안에서** 한다. Bubble Tea v2 렌더러는 셀 단위라 뷰 문자열에
-  넣은 이미지 이스케이프를 **삼켜버린다**(실험으로 확인 — 출력 바이트에 흔적 없음).
-  그래서 트랜스크립트 안에는 못 그리고, `tea.ExecProcess`로 터미널을 잠깐 넘겨
-  iTerm2 IIP(`OSC 1337;File=inline=1`)로 그린 뒤 키 입력을 받고 복귀한다.
-  Orca 터미널은 `@xterm/addon-image`를 번들해 sixel·IIP를 지원한다(앱 번들에서 확인).
-  `ASIDE_PHOTO_VIEWER=open`이면 외부 뷰어로 대신 연다.
+- **사진은 마우스를 올리면 트랜스크립트 제자리에 인라인으로 뜬다**(`internal/ui/photoview.go`).
+  뷰 문자열에 이미지 이스케이프를 넣으면 셀 렌더러가 삼키는 건 맞지만, 렌더러를
+  **우회**하면 된다: ① 자리표시 아래에 빈 줄 N개를 예약해 렌더러가 그 칸을 비우게
+  하고 ② 한 프레임 뒤 `tea.Raw`로 `ESC7` → `ESC[row;colH` → 이미지 → `ESC8`을 직접
+  쓴다. 호버 해제·스크롤·방 이동 때는 kitty면 삭제 명령을 보내고 공통으로
+  `tea.ClearScreen`을 때린다(셀 렌더러가 "안 바뀐 칸"을 다시 안 그려 잔상이 남음).
+  프로토콜은 공통 규격이 없어 둘 다 지원 — iTerm2 IIP(iTerm/WezTerm/**Orca**)와
+  kitty 그래픽(kitty/Ghostty)을 `TERM_PROGRAM`/`TERM`으로 분기, kitty 전송엔 `q=2`
+  필수(응답이 키 입력으로 샌다). `ASIDE_IMAGES=iterm|kitty|off`로 강제 가능.
+  지원 안 되는 터미널에서는 클릭 → 시스템 뷰어로 폴백.
+  (이 렌더링 방식은 etude의 `internal/ui/figure.go`와 같은 설계다.)
 - 사진은 **마우스를 올리면 밑줄, 클릭하면 열린다**(`photo N` 타이핑도 유지).
   `tea.MouseModeAllMotion`으로 모션 이벤트를 켜고, 화면 Y → 트랜스크립트 줄 →
   사진 번호로 역산한다(헤더 높이 + 뷰포트 스크롤 오프셋 보정). 마우스 리포팅이
