@@ -70,6 +70,10 @@ make build     # swiftc로 bridge를 .a로 컴파일 → cgo 링크
   캡처는 레티나 2배로 나오므로 `이미지폭/창폭`으로 스케일을 구해 크롭한다(실검증).
   macOS 15부터 `CGWindowListCreateImage`는 폐기 — `screencapture` CLI를 쓴다.
   **Screen Recording 권한**이 필요하다(손쉬운 사용과 별개).
+- 사진은 **마우스를 올리면 밑줄, 클릭하면 열린다**(`photo N` 타이핑도 유지).
+  `tea.MouseModeAllMotion`으로 모션 이벤트를 켜고, 화면 Y → 트랜스크립트 줄 →
+  사진 번호로 역산한다(헤더 높이 + 뷰포트 스크롤 오프셋 보정). 마우스 리포팅이
+  켜지면 터미널 텍스트 선택은 Option을 누른 채 해야 한다.
 - **런루프 없는 프로세스(Go 호스트)에서 NSWorkspace는 못 쓴다**:
   `NSWorkspace.shared.runningApplications`/`frontmostApplication`은 런루프가
   돌아야 갱신되는 스냅샷이라 영원히 stale. 앱 조회는

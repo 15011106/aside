@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -113,6 +114,11 @@ type model struct {
 
 	// notice is a short, non-error line under the transcript.
 	notice string
+
+	// photoLines maps a transcript line to the photo it shows, so the
+	// pointer can find one; hoverPhoto is whichever it is over.
+	photoLines map[int]int
+	hoverPhoto int
 
 	// lastChange is when the open room last produced something new; the
 	// poll runs faster for a while afterwards.
@@ -346,6 +352,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.refreshViewport()
 		}
 		return m, coverTick()
+
+	case tea.MouseMotionMsg:
+		if n := m.photoAt(msg.Y); n != m.hoverPhoto {
+			m.hoverPhoto = n
+			m.refreshViewport()
+		}
+		return m, nil
+
+	case tea.MouseClickMsg:
+		if n := m.photoAt(msg.Y); n > 0 {
+			return m.openPhoto(n)
+		}
+		return m, nil
 
 	case spinMsg:
 		if !m.busy {
@@ -643,6 +662,7 @@ func (m model) View() tea.View {
 
 		view := tea.NewView(b.String())
 		view.AltScreen = true
+		view.MouseMode = tea.MouseModeAllMotion
 		if c := m.input.Cursor(); c != nil {
 			runes := []rune(m.input.Value())
 			pos := min(m.input.Position(), len(runes))
@@ -687,6 +707,8 @@ func (m model) View() tea.View {
 
 	view := tea.NewView(b.String())
 	view.AltScreen = true
+	// motion events are what let a photo placeholder respond to hovering
+	view.MouseMode = tea.MouseModeAllMotion
 	view.Cursor = cursor
 	return view
 }
@@ -776,6 +798,21 @@ func (m model) renderRooms() string {
 }
 
 // refreshViewport repaints the transcript, honouring cover mode.
+var photoMarker = regexp.MustCompile(`\[(?:[^\[\]]*) (\d+) — type`)
+
+// indexPhotos notes which rendered line each photo placeholder landed on.
+func indexPhotos(content string) map[int]int {
+	out := map[int]int{}
+	for i, line := range strings.Split(content, "\n") {
+		if mt := photoMarker.FindStringSubmatch(line); mt != nil {
+			if n, err := strconv.Atoi(mt[1]); err == nil {
+				out[i] = n
+			}
+		}
+	}
+	return out
+}
+
 func (m *model) refreshViewport() {
 	if m.cover {
 		if m.coverState != nil {
@@ -784,8 +821,25 @@ func (m *model) refreshViewport() {
 		m.vp.GotoBottom()
 		return
 	}
-	m.vp.SetContent(m.renderMessages())
+	content := m.renderMessages()
+	m.photoLines = indexPhotos(content)
+	m.vp.SetContent(content)
 	m.vp.GotoBottom()
+}
+
+// photoAt maps a screen row to a photo number, allowing for the header
+// above the transcript and how far the viewport has scrolled.
+func (m model) photoAt(screenY int) int {
+	if m.mode != modeChat || m.cover || len(m.photoLines) == 0 {
+		return 0
+	}
+	return m.photoLines[screenY-m.transcriptTop()+m.vp.YOffset()]
+}
+
+// transcriptTop is the first screen row of the transcript: the welcome box
+// plus the blank line under it.
+func (m model) transcriptTop() int {
+	return lipgloss.Height(m.renderWelcome()) + 1
 }
 
 func (m model) renderMessages() string {
@@ -813,7 +867,11 @@ func (m model) renderMessages() string {
 			if label == "" {
 				label = "photo"
 			}
-			tag := claude.Render(fmt.Sprintf("[%s %d — type `photo %d` to open]", label, photoNo, photoNo))
+			style := claude
+			if photoNo == m.hoverPhoto {
+				style = claude.Underline(true).Bold(true)
+			}
+			tag := style.Render(fmt.Sprintf("[%s %d — click to open]", label, photoNo))
 			if msg.Mine {
 				b.WriteString(dim.Render("> ") + tag + "\n\n")
 				lastSender = ""
