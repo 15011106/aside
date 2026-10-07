@@ -3,8 +3,11 @@ package main
 import (
 	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"aside/internal/kakao"
 	"aside/internal/ui"
@@ -28,6 +31,7 @@ usage:
                            opens the room if needed, which marks it read)
   aside open <room>        open a conversation window by (partial) name
   aside send <room> <text...>  send a message (careful: real send)
+  aside photo <room> [n]   capture and open a photo from the last messages
 `
 
 // how many recent conversations name resolution scans
@@ -99,6 +103,20 @@ func main() {
 			fail(err)
 		}
 		for _, m := range messages {
+			if m.IsMedia() {
+				label := m.Text
+				if label == "" {
+					label = "photo"
+				}
+				who := title
+				if m.Mine {
+					who = "me"
+				} else if m.Sender != "" {
+					who = m.Sender
+				}
+				fmt.Printf("%-12s [%s]\n", who, label)
+				continue
+			}
 			sender := m.Sender
 			if m.Mine {
 				sender = "me"
@@ -173,6 +191,41 @@ func main() {
 				fmt.Println()
 			}
 		}
+	case "photo":
+		if len(os.Args) < 3 {
+			fail(fmt.Errorf("usage: aside photo <room> [n]"))
+		}
+		title, err := kakao.EnsureOpen(os.Args[2], resolveLimit)
+		if err != nil {
+			fail(err)
+		}
+		msgs, err := kakao.Messages(title, 20)
+		if err != nil {
+			fail(err)
+		}
+		var media []kakao.Message
+		for _, mm := range msgs {
+			if mm.IsMedia() {
+				media = append(media, mm)
+			}
+		}
+		if len(media) == 0 {
+			fail(fmt.Errorf("no photos in the last 20 messages of %s", title))
+		}
+		index := len(media)
+		if len(os.Args) > 3 {
+			if n, err := strconv.Atoi(os.Args[3]); err == nil && n >= 1 && n <= len(media) {
+				index = n
+			}
+		}
+		out := filepath.Join(os.TempDir(), fmt.Sprintf("aside-photo-%d.png", time.Now().UnixNano()))
+		saved, err := kakao.Capture(title, media[index-1], out)
+		if err != nil {
+			fail(err)
+		}
+		fmt.Println(saved)
+		_ = exec.Command("open", saved).Start()
+
 	case "version", "-v", "--version":
 		fmt.Println("aside", version)
 	case "help", "-h", "--help":

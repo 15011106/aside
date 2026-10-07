@@ -59,7 +59,17 @@ make build     # swiftc로 bridge를 .a로 컴파일 → cgo 링크
 - 전송 버튼 활성화를 위해 AXValue 설정 후 space+backspace 키 이벤트로
   카톡의 text-change 핸들러를 깨워야 하는 경우가 있음.
 - 내/상대 메시지 구분은 라벨이 아니라 **말풍선 좌우 기하학** (언어 무관).
-- 사진·영상·이모티콘은 텍스트 영역 없는 자체 행 → readable 카운트로 건너뜀.
+- 사진·영상·이모티콘은 **텍스트 영역이 없는 자체 행**이다. 예전엔 건너뛰어서
+  대화에서 사라졌지만 지금은 `kind:"media"`로 좌표와 함께 올려보내 `[photo N]`
+  자리표시로 보여주고 `photo N`으로 연다.
+  **주의: 말풍선 배경 자체가 AXImage다** — 텍스트 행에도 AXImage가 항상 있으므로
+  "이미지 있음"은 사진 판별 근거가 못 된다. 판별 기준은 *텍스트 영역이 없을 것*.
+- **숨긴 창도 캡처된다**: `screencapture -x -o -l <windowID>`는 Cmd+H 상태의
+  창도 실제 내용으로 찍는다(실검증). 그래서 사진 보기가 위장을 깨지 않는다.
+  CGWindowID는 AX 창 frame과 `CGWindowListCopyWindowInfo`의 bounds를 맞춰 찾고,
+  캡처는 레티나 2배로 나오므로 `이미지폭/창폭`으로 스케일을 구해 크롭한다(실검증).
+  macOS 15부터 `CGWindowListCreateImage`는 폐기 — `screencapture` CLI를 쓴다.
+  **Screen Recording 권한**이 필요하다(손쉬운 사용과 별개).
 - **런루프 없는 프로세스(Go 호스트)에서 NSWorkspace는 못 쓴다**:
   `NSWorkspace.shared.runningApplications`/`frontmostApplication`은 런루프가
   돌아야 갱신되는 스냅샷이라 영원히 stale. 앱 조회는

@@ -541,9 +541,18 @@ final class KakaoDriver {
         if r == textAreaRole { fields.append(node) }
         else if r == staticTextRole { labels.append(node) }
       }
+      // A row with no text area is media — a photo, a video or a large
+      // emoticon. Those used to be dropped, which made conversations read
+      // as if nothing had been sent; emit them with their on-screen rect
+      // so the caller can show a placeholder and capture the bubble.
       guard let field = fields.last,
             let raw = field.text(kAXValueAttribute as String), !raw.isEmpty,
-            let msgOrigin = field.origin, let msgSize = field.extent else { continue }
+            let msgOrigin = field.origin, let msgSize = field.extent else {
+        if let media = mediaEntry(cell: cell, winOrigin: winOrigin, winSize: winSize, lastSender: &lastSender) {
+          out.append(media)
+        }
+        continue
+      }
 
       let body = raw.trimmingCharacters(in: .whitespacesAndNewlines)
       if Kakao.syntheticRows.contains(body) { continue }
@@ -565,9 +574,111 @@ final class KakaoDriver {
         }
         sender = lastSender
       }
-      out.append(["text": body, "sender": sender, "mine": mine, "edited": edited])
+      out.append(["kind": "text", "text": body, "sender": sender, "mine": mine, "edited": edited])
     }
     return out
+  }
+
+  // mediaEntry describes a text-less row: what kind of thing it is, who
+  // sent it, and where its bubble sits on screen.
+  private func mediaEntry(cell: AXUIElement, winOrigin: CGPoint, winSize: CGSize,
+                          lastSender: inout String) -> [String: Any]? {
+    let image = cell.firstDescendant(role: kAXImageRole as String)
+    let anchor = image ?? cell
+    guard let origin = anchor.origin, let size = anchor.extent,
+          size.width > 24, size.height > 24 else { return nil }
+
+    let leftGap = origin.x - winOrigin.x
+    let rightGap = (winOrigin.x + winSize.width) - (origin.x + size.width)
+    var mine = true
+    var sender = ""
+    if leftGap <= rightGap {
+      mine = false
+      for label in cell.children where label.axRole == kAXStaticTextRole as String {
+        if let name = candidateSender(label.caption) { lastSender = name }
+      }
+      sender = lastSender
+    }
+
+    // AXDescription usually carries the word KakaoTalk uses for the kind
+    let described = (image?.text(kAXDescriptionAttribute as String) ?? "")
+      .trimmingCharacters(in: .whitespacesAndNewlines)
+    return [
+      "kind": "media",
+      "text": described,
+      "sender": sender,
+      "mine": mine,
+      "edited": false,
+      "x": Double(origin.x), "y": Double(origin.y),
+      "w": Double(size.width), "h": Double(size.height),
+    ]
+  }
+
+  // windowNumber finds the CoreGraphics window id for one of KakaoTalk's
+  // windows by matching the frame the accessibility tree reports.
+  private func windowNumber(for chat: AXUIElement) -> CGWindowID? {
+    guard let origin = chat.origin, let size = chat.extent,
+          let pid = try? kakaoApp().processIdentifier else { return nil }
+    let infos = CGWindowListCopyWindowInfo([.optionAll, .excludeDesktopElements], kCGNullWindowID)
+      as? [[String: Any]] ?? []
+    for info in infos {
+      guard (info[kCGWindowOwnerPID as String] as? pid_t) == pid,
+            let bounds = info[kCGWindowBounds as String] as? [String: Any],
+            let x = bounds["X"] as? Double, let y = bounds["Y"] as? Double,
+            let w = bounds["Width"] as? Double, let h = bounds["Height"] as? Double else { continue }
+      if abs(x - Double(origin.x)) < 6, abs(y - Double(origin.y)) < 6,
+         abs(w - Double(size.width)) < 6, abs(h - Double(size.height)) < 6 {
+        return CGWindowID(info[kCGWindowNumber as String] as? Int ?? 0)
+      }
+    }
+    return nil
+  }
+
+  // capture writes the bubble at the given screen rect to a PNG. The window
+  // is captured by id, which works while KakaoTalk is hidden — nothing is
+  // brought on screen, so the disguise holds.
+  func capture(window name: String, x: Double, y: Double, w: Double, h: Double,
+               to path: String) throws -> [String: Any] {
+    let chat = try window(titled: name)
+    guard let winOrigin = chat.origin, let winSize = chat.extent else {
+      throw BridgeError.message("Failed to read the chat window frame.")
+    }
+    guard let id = windowNumber(for: chat) else {
+      throw BridgeError.message("Could not find the chat window to capture.")
+    }
+
+    let shot = NSTemporaryDirectory() + "aside-shot-\(id).png"
+    let task = Process()
+    task.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+    task.arguments = ["-x", "-o", "-l", String(id), shot]
+    try task.run()
+    task.waitUntilExit()
+    defer { try? FileManager.default.removeItem(atPath: shot) }
+
+    guard task.terminationStatus == 0,
+          let source = CGImageSourceCreateWithURL(URL(fileURLWithPath: shot) as CFURL, nil),
+          let full = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+      throw BridgeError.message("Screen capture failed — grant Screen Recording to this terminal.")
+    }
+
+    // the capture may be at Retina scale; map the screen rect into it
+    let scale = winSize.width > 0 ? Double(full.width) / Double(winSize.width) : 1
+    var crop = CGRect(
+      x: (x - Double(winOrigin.x)) * scale,
+      y: (y - Double(winOrigin.y)) * scale,
+      width: w * scale, height: h * scale
+    ).integral
+    crop = crop.intersection(CGRect(x: 0, y: 0, width: full.width, height: full.height))
+    guard !crop.isEmpty, let cropped = full.cropping(to: crop) else {
+      throw BridgeError.message("The bubble is outside the captured window.")
+    }
+
+    let rep = NSBitmapImageRep(cgImage: cropped)
+    guard let png = rep.representation(using: .png, properties: [:]) else {
+      throw BridgeError.message("Could not encode the capture.")
+    }
+    try png.write(to: URL(fileURLWithPath: path))
+    return ["path": path, "width": cropped.width, "height": cropped.height]
   }
 
   func scrollBack(window name: String) throws {
@@ -912,6 +1023,12 @@ private func dispatch(_ action: String, _ p: [String: Any]) throws -> Any {
     return try driver.probeComposer(window: p["title"] as? String ?? "")
   case "send":
     return try driver.send(window: p["title"] as? String ?? "", text: p["text"] as? String ?? "")
+  case "capture":
+    return try driver.capture(
+      window: p["title"] as? String ?? "",
+      x: p["x"] as? Double ?? 0, y: p["y"] as? Double ?? 0,
+      w: p["w"] as? Double ?? 0, h: p["h"] as? Double ?? 0,
+      to: p["path"] as? String ?? "")
   case "scrollOlder":
     try driver.scrollBack(window: p["title"] as? String ?? ""); return [:] as [String: Any]
   default:

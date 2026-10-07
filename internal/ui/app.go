@@ -12,6 +12,9 @@ package ui
 import (
 	"fmt"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -107,6 +110,9 @@ type model struct {
 	// send's text is parked in pendingSend and restored to the composer.
 	reopening   bool
 	pendingSend string
+
+	// notice is a short, non-error line under the transcript.
+	notice string
 
 	// lastChange is when the open room last produced something new; the
 	// poll runs faster for a while afterwards.
@@ -523,6 +529,8 @@ func (m model) handleKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 	case "pgdown":
 		m.vp.HalfPageDown()
 		return m, nil
+	case "ctrl+p":
+		return m.openPhoto(0)
 	case "ctrl+o":
 		if m.busy {
 			return m, nil
@@ -544,6 +552,17 @@ func (m model) handleKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 		if text == "" || m.busy {
 			return m, nil
 		}
+		// `photo` / `photo N` opens a picture instead of sending anything
+		if strings.HasPrefix(strings.ToLower(text), "photo") {
+			m.input.Reset()
+			index := 0
+			if fields := strings.Fields(text); len(fields) > 1 {
+				if n, err := strconv.Atoi(fields[1]); err == nil {
+					index = n
+				}
+			}
+			return m.openPhoto(index)
+		}
 		m.pendingSend = text
 		m.input.Reset()
 		cmd := m.startBusy("Dispatching")
@@ -557,6 +576,40 @@ func (m model) handleKey(key tea.KeyPressMsg) (tea.Model, tea.Cmd) {
 
 // openSelected opens the room under the cursor in the (possibly filtered)
 // list and leaves filter state behind.
+// openPhoto captures the bubble of the nth photo in the open room and hands
+// the PNG to the system viewer. Index 0 means the most recent one. The
+// capture reads the window by id, so KakaoTalk stays hidden throughout.
+func (m model) openPhoto(index int) (tea.Model, tea.Cmd) {
+	var media []kakao.Message
+	for _, msg := range m.msgs {
+		if msg.IsMedia() {
+			media = append(media, msg)
+		}
+	}
+	if len(media) == 0 {
+		m.notice = ""
+		m.errText = "no photos in view — scroll back with ctrl+o"
+		return m, nil
+	}
+	if index <= 0 || index > len(media) {
+		index = len(media)
+	}
+
+	path := filepath.Join(os.TempDir(), fmt.Sprintf("aside-photo-%d.png", time.Now().UnixNano()))
+	saved, err := kakao.Capture(m.room, media[index-1], path)
+	if err != nil {
+		m.errText = err.Error()
+		return m, nil
+	}
+	if err := exec.Command("open", saved).Start(); err != nil {
+		m.errText = err.Error()
+		return m, nil
+	}
+	m.errText = ""
+	m.notice = fmt.Sprintf("opened photo %d of %d", index, len(media))
+	return m, nil
+}
+
 func (m model) openSelected() (tea.Model, tea.Cmd) {
 	rooms := m.filteredRooms()
 	if len(rooms) == 0 || m.busy || m.cursor >= len(rooms) {
@@ -646,6 +699,9 @@ func (m model) renderWelcome() string {
 }
 
 func (m model) renderSpinnerLine() string {
+	if m.errText == "" && !m.busy && m.notice != "" {
+		return dim.Render("  ⎿  " + clip(m.notice, max(20, m.width-12)))
+	}
 	if m.errText != "" {
 		return errStyle.Render("  ⎿  Error: " + clip(m.errText, max(20, m.width-12)))
 	}
@@ -737,7 +793,37 @@ func (m model) renderMessages() string {
 	wrap := lipgloss.NewStyle().Width(width)
 	var b strings.Builder
 	lastSender := ""
+	photoNo := 0
 	for _, msg := range m.msgs {
+		// a header line for whoever is speaking, shared by both kinds
+		openSender := func() {
+			sender := msg.Sender
+			if sender == "" && m.room != "" {
+				sender = m.room
+			}
+			if sender != lastSender {
+				b.WriteString(toolGreen.Render("● ") + "Task" + dim.Render("("+sender+")") + "\n")
+				lastSender = sender
+			}
+		}
+
+		if msg.IsMedia() {
+			photoNo++
+			label := msg.Text
+			if label == "" {
+				label = "photo"
+			}
+			tag := claude.Render(fmt.Sprintf("[%s %d — type `photo %d` to open]", label, photoNo, photoNo))
+			if msg.Mine {
+				b.WriteString(dim.Render("> ") + tag + "\n\n")
+				lastSender = ""
+				continue
+			}
+			openSender()
+			b.WriteString(dim.Render("  ⎿  ") + tag + "\n\n")
+			continue
+		}
+
 		text := msg.Text
 		if msg.Edited {
 			text += dim.Render(" (edited)")
@@ -748,19 +834,12 @@ func (m model) renderMessages() string {
 			lastSender = ""
 			continue
 		}
-		// incoming messages read as tool output: ● Task(sender) + ⎿ lines;
-		// 1:1 rooms (no sender label) read as plain agent prose.
-		sender := msg.Sender
-		if sender == "" && m.room != "" {
-			sender = m.room
-		}
-		if sender != lastSender {
-			b.WriteString(toolGreen.Render("● ") + "Task" + dim.Render("("+sender+")") + "\n")
-			lastSender = sender
-		}
+		// incoming messages read as tool output: ● Task(sender) + ⎿ lines
+		openSender()
 		indented := strings.ReplaceAll(wrap.Render(text), "\n", "\n     ")
 		b.WriteString(dim.Render("  ⎿  ") + indented + "\n\n")
 	}
+
 	if len(m.msgs) == 0 {
 		b.WriteString(dim.Render("  (no readable messages)"))
 	}

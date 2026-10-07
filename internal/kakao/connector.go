@@ -4,10 +4,10 @@
 package kakao
 
 import (
-	"os/exec"
-	"time"
 	"fmt"
+	"os/exec"
 	"strings"
+	"time"
 )
 
 type DoctorInfo struct {
@@ -26,11 +26,20 @@ type Conversation struct {
 }
 
 type Message struct {
-	Text   string `json:"text"`
-	Sender string `json:"sender"`
-	Mine   bool   `json:"mine"`
-	Edited bool   `json:"edited"`
+	// Kind is "text" or "media" — a photo, video or large emoticon, which
+	// carries no text but does have a bubble we can capture.
+	Kind   string  `json:"kind"`
+	Text   string  `json:"text"`
+	Sender string  `json:"sender"`
+	Mine   bool    `json:"mine"`
+	Edited bool    `json:"edited"`
+	X      float64 `json:"x"`
+	Y      float64 `json:"y"`
+	W      float64 `json:"w"`
+	H      float64 `json:"h"`
 }
+
+func (m Message) IsMedia() bool { return m.Kind == "media" }
 
 func Doctor() (DoctorInfo, error) {
 	var info DoctorInfo
@@ -161,6 +170,26 @@ func Send(title, text string) error {
 		return fmt.Errorf("kakao: send was not confirmed")
 	}
 	return nil
+}
+
+// Capture writes the bubble at a message's screen rect to a PNG. It works
+// while KakaoTalk is hidden: the window is captured by id rather than from
+// the screen, so nothing has to be brought into view.
+func Capture(title string, m Message, path string) (string, error) {
+	if !m.IsMedia() {
+		return "", fmt.Errorf("kakao: that message is not a photo")
+	}
+	var out struct {
+		Path string `json:"path"`
+	}
+	err := request("capture", map[string]any{
+		"title": title, "path": path,
+		"x": m.X, "y": m.Y, "w": m.W, "h": m.H,
+	}, &out)
+	if err != nil {
+		return "", err
+	}
+	return out.Path, nil
 }
 
 func ScrollOlder(title string) error {
