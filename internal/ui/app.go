@@ -28,7 +28,16 @@ const (
 	modeChat
 )
 
-const pollInterval = 3 * time.Second
+// Reading an open chat costs a few tens of milliseconds, so the poll can
+// run several times a second while a conversation is live and still cost
+// almost nothing; it backs off once the room goes quiet. A read already in
+// flight suppresses the next tick, so a slow read throttles the loop
+// instead of queueing behind it.
+const (
+	pollActive = 300 * time.Millisecond
+	pollIdle   = 2 * time.Second
+	activeFor  = 2 * time.Minute
+)
 const spinInterval = 250 * time.Millisecond
 
 var (
@@ -98,6 +107,11 @@ type model struct {
 	// send's text is parked in pendingSend and restored to the composer.
 	reopening   bool
 	pendingSend string
+
+	// lastChange is when the open room last produced something new; the
+	// poll runs faster for a while afterwards.
+	lastChange time.Time
+	signature  string
 
 	// ownedWindow is true when aside created the current room's window, so
 	// leaving the room closes it again; windows the user opened themselves
@@ -199,8 +213,30 @@ func coverTick() tea.Cmd {
 	return tea.Tick(coverTick_, func(time.Time) tea.Msg { return coverTickMsg{} })
 }
 
-func tick() tea.Cmd {
-	return tea.Tick(pollInterval, func(time.Time) tea.Msg { return tickMsg{} })
+func tick(after time.Duration) tea.Cmd {
+	return tea.Tick(after, func(time.Time) tea.Msg { return tickMsg{} })
+}
+
+// pollDelay keeps the loop responsive right after something happens and
+// backs off when the room goes quiet.
+// messageSignature is a cheap stand-in for "did anything change?" — the
+// count plus the newest line is enough to notice a new or edited message.
+func messageSignature(items []kakao.Message) string {
+	if len(items) == 0 {
+		return "0"
+	}
+	last := items[len(items)-1]
+	return fmt.Sprintf("%d|%s|%v", len(items), last.Text, last.Mine)
+}
+
+func (m model) pollDelay() time.Duration {
+	if m.mode != modeChat {
+		return pollIdle
+	}
+	if time.Since(m.lastChange) < activeFor {
+		return pollActive
+	}
+	return pollIdle
 }
 
 func spin() tea.Cmd {
@@ -217,7 +253,7 @@ func (m *model) startBusy(verb string) tea.Cmd {
 }
 
 func (m model) Init() tea.Cmd {
-	return tea.Batch(fetchRooms, tick(), spin())
+	return tea.Batch(fetchRooms, tick(pollActive), spin())
 }
 
 func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -243,6 +279,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case openedMsg:
+		m.lastChange = time.Now()
 		m.room = msg.title
 		m.mode = modeChat
 		m.ownedWindow = msg.ownedByUs
@@ -256,6 +293,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.polling = false
 		m.reopening = false
 		m.msgs = msg.items
+		if sig := messageSignature(msg.items); sig != m.signature {
+			m.signature = sig
+			m.lastChange = time.Now()
+		}
 		m.refreshViewport()
 		return m, nil
 
@@ -312,7 +353,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.mode == modeChat && m.room != "" && !m.busy && !m.polling {
 			m.polling = true
 			title := m.room
-			return m, tea.Batch(tick(), func() tea.Msg {
+			return m, tea.Batch(tick(m.pollDelay()), func() tea.Msg {
 				items, err := kakao.Messages(title, 20)
 				if err != nil {
 					return errMsg{err}
@@ -320,7 +361,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return messagesMsg{title: title, items: items}
 			})
 		}
-		return m, tick()
+		return m, tick(m.pollDelay())
 	}
 
 	var cmd tea.Cmd
